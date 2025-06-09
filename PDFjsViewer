@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html dir="ltr" mozdisallowselectionprint>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="google" content="notranslate">
+  <title>PDF.js Viewer</title>
+  
+  <link rel="stylesheet" href="https://mozilla.github.io/pdf.js/web/viewer.css">
+  
+  <script src="https://mozilla.github.io/pdf.js/build/pdf.js"></script>
+  <script src="https://mozilla.github.io/pdf.js/web/viewer.js"></script>
+  
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #404040;
+    }
+    
+    #outerContainer {
+      width: 100%;
+      height: 100vh;
+      position: relative;
+    }
+    
+    #mainContainer {
+      position: absolute;
+      top: 32px;
+      bottom: 0;
+      left: 0;
+      right: 0;
+    }
+    
+    #viewerContainer {
+      overflow: auto;
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      right: 0;
+    }
+    
+    .toolbar {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 0;
+      height: 32px;
+      background: #474747;
+      display: flex;
+      align-items: center;
+      padding: 0 4px;
+      box-sizing: border-box;
+    }
+    
+    .toolbarButton {
+      border: none;
+      background: none;
+      color: rgba(255, 255, 255, 0.8);
+      cursor: pointer;
+      padding: 4px 8px;
+      margin: 0 2px;
+      font-size: 12px;
+      border-radius: 2px;
+    }
+    
+    .toolbarButton:hover {
+      background: rgba(255, 255, 255, 0.09);
+    }
+    
+    .toolbarSeparator {
+      width: 1px;
+      height: 20px;
+      background: rgba(255, 255, 255, 0.2);
+      margin: 0 4px;
+    }
+    
+    .page {
+      margin: 9px auto;
+      border: 9px solid transparent;
+      background: white;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .canvasWrapper {
+      position: relative;
+    }
+    
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+
+<body tabindex="1" class="loadingInProgress">
+  <div id="outerContainer">
+    <div class="toolbar">
+      <button id="previous" class="toolbarButton" title="Previous Page">
+        Previous
+      </button>
+      <button id="next" class="toolbarButton" title="Next Page">
+        Next
+      </button>
+      
+      <div class="toolbarSeparator"></div>
+      
+      <input type="number" id="pageNumber" class="toolbarField pageNumber" title="Page" value="1" size="4" min="1" tabindex="91">
+      <span id="numPages" class="toolbarLabel"></span>
+      
+      <div class="toolbarSeparator"></div>
+      
+      <button id="zoomOut" class="toolbarButton" title="Zoom Out">
+        Zoom Out
+      </button>
+      <button id="zoomIn" class="toolbarButton" title="Zoom In">
+        Zoom In
+      </button>
+      
+      <div class="toolbarSeparator"></div>
+      
+      <button id="print" class="toolbarButton" title="Print">
+        Print
+      </button>
+      <button id="download" class="toolbarButton" title="Save">
+        Save
+      </button>
+    </div>
+
+    <div id="mainContainer">
+      <div id="viewerContainer" tabindex="0">
+        <div id="viewer" class="pdfViewer"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // PDF.js setup
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://mozilla.github.io/pdf.js/build/pdf.worker.js';
+
+    class CustomPDFViewer {
+      constructor() {
+        this.pdfDocument = null;
+        this.pageNum = 1;
+        this.pageRendering = false;
+        this.pageNumPending = null;
+        this.scale = 1.5;
+        this.canvas = null;
+        this.ctx = null;
+        
+        this.setupEventListeners();
+        this.setupMessageListener();
+      }
+
+      setupEventListeners() {
+        // Navigation buttons
+        document.getElementById('previous').addEventListener('click', () => {
+          if (this.pageNum <= 1) return;
+          this.pageNum--;
+          this.queueRenderPage(this.pageNum);
+        });
+
+        document.getElementById('next').addEventListener('click', () => {
+          if (this.pageNum >= this.pdfDocument.numPages) return;
+          this.pageNum++;
+          this.queueRenderPage(this.pageNum);
+        });
+
+        // Page number input
+        document.getElementById('pageNumber').addEventListener('change', (e) => {
+          const pageNum = parseInt(e.target.value);
+          if (pageNum >= 1 && pageNum <= this.pdfDocument.numPages) {
+            this.pageNum = pageNum;
+            this.queueRenderPage(this.pageNum);
+          }
+        });
+
+        // Zoom buttons
+        document.getElementById('zoomOut').addEventListener('click', () => {
+          this.scale = Math.max(0.5, this.scale - 0.25);
+          this.queueRenderPage(this.pageNum);
+        });
+
+        document.getElementById('zoomIn').addEventListener('click', () => {
+          this.scale = Math.min(3.0, this.scale + 0.25);
+          this.queueRenderPage(this.pageNum);
+        });
+
+        // Print and Save buttons - these will send data back to React Native
+        document.getElementById('print').addEventListener('click', () => {
+          this.handlePrintAction();
+        });
+
+        document.getElementById('download').addEventListener('click', () => {
+          this.handleSaveAction();
+        });
+      }
+
+      setupMessageListener() {
+        // Listen for messages from React Native
+        window.addEventListener('message', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            if (data.base64 && data.filename) {
+              this.loadPDFFromBase64(data.base64, data.filename);
+            }
+            
+            if (data.command === 'clear') {
+              this.clearDocument();
+            }
+          } catch (error) {
+            console.warn('Invalid message received:', error);
+          }
+        });
+
+        // Signal that the viewer is ready
+        this.sendMessageToReactNative({
+          command: 'ready'
+        });
+      }
+
+      async loadPDFFromBase64(base64Data, filename) {
+        try {
+          // Convert base64 to Uint8Array
+          const binaryString = atob(base64Data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          const loadingTask = pdfjsLib.getDocument({data: bytes});
+          this.pdfDocument = await loadingTask.promise;
+          this.filename = filename;
+          
+          document.getElementById('numPages').textContent = ` / ${this.pdfDocument.numPages}`;
+          
+          // Render the first page
+          this.renderPage(1);
+          
+        } catch (error) {
+          console.error('Error loading PDF:', error);
+        }
+      }
+
+      renderPage(num) {
+        this.pageRendering = true;
+        
+        this.pdfDocument.getPage(num).then((page) => {
+          const viewport = page.getViewport({scale: this.scale});
+          
+          // Create or update canvas
+          if (!this.canvas) {
+            this.canvas = document.createElement('canvas');
+            this.ctx = this.canvas.getContext('2d');
+            
+            const pageDiv = document.createElement('div');
+            pageDiv.className = 'page';
+            pageDiv.appendChild(this.canvas);
+            
+            const viewer = document.getElementById('viewer');
+            viewer.innerHTML = '';
+            viewer.appendChild(pageDiv);
+          }
+          
+          this.canvas.height = viewport.height;
+          this.canvas.width = viewport.width;
+
+          const renderContext = {
+            canvasContext: this.ctx,
+            viewport: viewport
+          };
+          
+          const renderTask = page.render(renderContext);
+          
+          renderTask.promise.then(() => {
+            this.pageRendering = false;
+            if (this.pageNumPending !== null) {
+              this.renderPage(this.pageNumPending);
+              this.pageNumPending = null;
+            }
+          });
+        });
+
+        // Update page counter
+        document.getElementById('pageNumber').value = num;
+      }
+
+      queueRenderPage(num) {
+        if (this.pageRendering) {
+          this.pageNumPending = num;
+        } else {
+          this.renderPage(num);
+        }
+      }
+
+      async getPDFAsBase64() {
+        if (!this.pdfDocument) {
+          throw new Error('No PDF document loaded');
+        }
+
+        try {
+          // For now, we'll return the original PDF data
+          // In a real implementation with editing capabilities, 
+          // you would need to serialize the modified PDF
+          const data = await this.pdfDocument.getData();
+          const base64 = btoa(String.fromCharCode(...data));
+          return base64;
+        } catch (error) {
+          console.error('Error getting PDF data:', error);
+          throw error;
+        }
+      }
+
+      async handlePrintAction() {
+        try {
+          const base64Data = await this.getPDFAsBase64();
+          
+          this.sendMessageToReactNative({
+            command: 'print',
+            base64: base64Data,
+            filename: this.filename || 'document.pdf'
+          });
+        } catch (error) {
+          console.error('Error handling print action:', error);
+        }
+      }
+
+      async handleSaveAction() {
+        try {
+          const base64Data = await this.getPDFAsBase64();
+          
+          this.sendMessageToReactNative({
+            command: 'save',
+            base64: base64Data,
+            filename: this.filename || 'document.pdf'
+          });
+        } catch (error) {
+          console.error('Error handling save action:', error);
+        }
+      }
+
+      sendMessageToReactNative(data) {
+        // Send message to React Native WebView
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(data));
+        } else {
+          // Fallback for testing in browser
+          window.parent.postMessage(JSON.stringify(data), '*');
+        }
+      }
+
+      clearDocument() {
+        this.pdfDocument = null;
+        this.pageNum = 1;
+        this.filename = null;
+        
+        const viewer = document.getElementById('viewer');
+        viewer.innerHTML = '';
+        
+        document.getElementById('pageNumber').value = '1';
+        document.getElementById('numPages').textContent = '';
+      }
+    }
+
+    // Initialize the viewer when DOM is ready
+    document.addEventListener('DOMContentLoaded', () => {
+      new CustomPDFViewer();
+    });
+  </script>
+</body>
+</html>
